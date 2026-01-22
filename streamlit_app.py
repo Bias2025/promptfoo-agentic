@@ -1,109 +1,150 @@
-
 import streamlit as st
+import yaml
 import subprocess
-import tempfile
-import os
-import shlex
 from pathlib import Path
+import shlex
 import threading
-import time
 
-st.set_page_config(page_title="Promptfoo Red Team (Streamlit)", layout="wide")
+st.set_page_config(page_title="Red Team Wizard", layout="wide")
 
-st.title("Promptfoo Red Team — Streamlit UI")
-st.markdown(
-    """
-Upload or edit a `promptfooconfig.yaml` (Promptfoo redteam config).  
-This UI will save the config, run `npx promptfoo redteam run` and stream output logs.
-"""
+st.title("Agentic Red Team ")
+
+WORKDIR = Path("promptfoo_workspace")
+WORKDIR.mkdir(exist_ok=True)
+CONFIG_PATH = WORKDIR / "promptfooconfig.yaml"
+
+# -----------------------------
+# Step 1: Purpose & target
+# -----------------------------
+st.header("1️⃣ Describe your target application")
+
+purpose = st.text_area(
+    "Purpose (required)",
+    placeholder="Example: Customer support chatbot for banking queries",
 )
 
-with st.sidebar:
-    st.header("Controls")
-    uploaded = st.file_uploader("Upload promptfooconfig.yaml", type=["yaml", "yml"], accept_multiple_files=False)
-    config_text = st.text_area("Or paste / edit config text here (overrides upload)", height=250)
-    auto_run = st.checkbox("Auto-run after saving config", value=False)
-    run_button = st.button("Run redteam now")
+target_type = st.selectbox(
+    "Target type",
+    ["HTTP API", "OpenAI-compatible model", "Local / custom code"],
+)
 
-# decide config content
-config_content = None
-if uploaded is not None:
-    config_content = uploaded.read().decode("utf-8")
-if config_text and config_text.strip():
-    config_content = config_text
+# -----------------------------
+# Step 2: Connection details
+# -----------------------------
+st.header("2️⃣ Configure how Promptfoo talks to your target")
 
-if not config_content:
-    st.info("No config provided. You can upload a `promptfooconfig.yaml` or paste its contents in the text area.")
-    st.stop()
+target_config = {}
 
-# Save config to a temp directory (persist inside app workspace)
-workdir = Path("promptfoo_workspace")
-workdir.mkdir(exist_ok=True)
-config_path = workdir / "promptfooconfig.yaml"
-config_path.write_text(config_content, encoding="utf-8")
-st.success(f"Saved config to `{config_path}`")
-
-log_container = st.empty()
-
-def run_promptfoo(cmd_args, out_element):
-    """
-    Runs a command (list) and streams output to the given streamlit element.
-    Returns (returncode, captured_text)
-    """
-    # Use a text area to show streaming output
-    placeholder = out_element.container()
-    text_area = placeholder.text_area("Promptfoo logs", value="", height=420)
-    # We'll update via the placeholder's markdown each line appended
-    proc = subprocess.Popen(
-        cmd_args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        bufsize=1,
-        cwd=str(workdir),
+if target_type == "HTTP API":
+    target_config["type"] = "http"
+    target_config["url"] = st.text_input("Endpoint URL", placeholder="https://api.example.com/chat")
+    target_config["method"] = st.selectbox("HTTP method", ["POST", "GET"])
+    target_config["headers"] = st.text_area(
+        "Headers (YAML format)",
+        placeholder="Authorization: Bearer YOUR_TOKEN",
     )
 
-    captured = []
-    try:
-        for line in proc.stdout:
-            captured.append(line)
-            # update text area with new content
-            placeholder.text_area("Promptfoo logs", value="".join(captured), height=420)
-    except Exception as ex:
-        captured.append(f"\n[ERROR] {ex}\n")
-        placeholder.text_area("Promptfoo logs", value="".join(captured), height=420)
-    proc.wait()
-    return proc.returncode, "".join(captured)
+elif target_type == "OpenAI-compatible model":
+    target_config["type"] = "openai"
+    target_config["model"] = st.text_input("Model name", value="gpt-4.1-mini")
+    target_config["apiBase"] = st.text_input(
+        "API base (optional)",
+        placeholder="https://api.openai.com/v1",
+    )
 
-def run_in_thread(args_list):
-    # thread runner to avoid blocking the Streamlit main thread
-    status = st.empty()
-    status.info("Running red team... this may take a while.")
-    rc, out = run_promptfoo(args_list, log_container)
-    if rc == 0:
-        status.success("Promptfoo finished successfully.")
-    else:
-        status.error(f"Promptfoo exited with code {rc}. See logs above.")
-    # If a report can be generated, user can run `npx promptfoo redteam report` manually;
-    # we try to run it automatically if present.
-    return rc, out
+else:
+    target_config["type"] = "custom"
+    target_config["entrypoint"] = st.text_input(
+        "Entrypoint script",
+        placeholder="python my_model.py",
+    )
 
-if run_button or auto_run:
-    # Build the npx command. We assume Node & npx are available in PATH.
-    st.info("Attempting to run `npx promptfoo@latest redteam run` using local npx.")
-    args = shlex.split("npx promptfoo@latest redteam run --config promptfooconfig.yaml")
-    # Run in background thread so streamlit remains responsive
-    thread = threading.Thread(target=run_in_thread, args=(args,), daemon=True)
-    thread.start()
-    # optionally wait a short time to allow logs to appear
-    time.sleep(0.2)
+# -----------------------------
+# Step 3: Plugins
+# -----------------------------
+st.header("3️⃣ Select adversarial plugins")
 
-st.markdown("---")
-st.subheader("Quick troubleshooting / notes")
-st.markdown(
-    """
-- This UI calls the Promptfoo CLI via `npx` (Node.js 20+ required). If `npx` is not installed in the environment, the run will fail.  
-- To deploy reliably in the cloud, use the provided `Dockerfile` (installs Node 20 and Python).  
-- After runs, Promptfoo writes artifacts (e.g., `redteam.yaml`, report files) under the working directory; you can download them from the app host or browse them if you mount persistence.
-"""
+plugin_presets = {
+    "Default": [
+        "prompt-injection",
+        "jailbreak",
+        "policy-violation",
+        "roleplay",
+    ],
+    "Injection-heavy": [
+        "prompt-injection",
+        "indirect-prompt-injection",
+    ],
+    "Safety-focused": [
+        "policy-violation",
+        "harmful-content",
+    ],
+}
+
+preset = st.selectbox("Plugin preset", list(plugin_presets.keys()))
+plugins = plugin_presets[preset]
+
+st.code("\n".join(plugins), language="text")
+
+# -----------------------------
+# Step 4: Strategies
+# -----------------------------
+st.header("4️⃣ Select attack strategies")
+
+strategies = st.multiselect(
+    "Strategies",
+    [
+        "base64",
+        "roleplay",
+        "translation",
+        "encoding",
+        "context-shifting",
+    ],
+    default=["roleplay", "context-shifting"],
 )
+
+# -----------------------------
+# Step 5: Review & generate
+# -----------------------------
+st.header("5️⃣ Review & generate config")
+
+if st.button("Generate promptfooconfig.yaml"):
+    if not purpose.strip():
+        st.error("Purpose is required.")
+        st.stop()
+
+    config = {
+        "purpose": purpose,
+        "targets": [
+            {
+                "id": "target-app",
+                **target_config,
+            }
+        ],
+        "redteam": {
+            "plugins": plugins,
+            "strategies": strategies,
+        },
+    }
+
+    CONFIG_PATH.write_text(yaml.dump(config, sort_keys=False))
+    st.success(f"Configuration written to {CONFIG_PATH}")
+
+    st.subheader("Generated config")
+    st.code(yaml.dump(config, sort_keys=False), language="yaml")
+
+# -----------------------------
+# Run redteam
+# -----------------------------
+st.header("🚨 Run red team")
+
+def run_redteam():
+    cmd = shlex.split("npx promptfoo@latest redteam run --config promptfooconfig.yaml")
+    subprocess.run(cmd, cwd=WORKDIR)
+
+if st.button("Run redteam now"):
+    if not CONFIG_PATH.exists():
+        st.error("Generate a config first.")
+    else:
+        threading.Thread(target=run_redteam, daemon=True).start()
+        st.info("Red team running… check logs in the terminal / container output.")
